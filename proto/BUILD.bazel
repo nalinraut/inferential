@@ -1,0 +1,14 @@
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+
+proto_library(
+    name = "inferential_proto",
+    srcs = ["inferential.proto"],
+    visibility = ["//visibility:public"],
+)
+
+cc_proto_library(
+    name = "inferential_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":inferential_proto"],
+)

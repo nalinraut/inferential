@@ -1,0 +1,86 @@
+[project]
+name = "inferential"
+version = "1.0.1"
+description = "Robotics-aware inference orchestration on top of Ray Serve"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "Nalin Raut" },
+]
+keywords = ["robotics", "inference", "vla", "vlm", "ray"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "pyzmq>=26.0",
+    "protobuf>=5.0",
+    "numpy>=1.24",
+]
+
+[project.urls]
+Documentation = "https://github.com/nalinraut/inferential/tree/main/docs"
+Homepage = "https://github.com/nalinraut/inferential"
+Issues = "https://github.com/nalinraut/inferential/issues"
+Repository = "https://github.com/nalinraut/inferential"
+
+[project.optional-dependencies]
+server = [
+    "ray[serve]>=2.9",
+    "pydantic>=2.0",
+]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+]
+dev = [
+    "inferential[server]",
+    "grpcio-tools>=1.60",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "pre-commit>=3.7",
+]
+
+[build-system]
+requires = ["hatchling", "grpcio-tools>=1.60"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.hooks.custom]
+
+[tool.hatch.build.force-include]
+"inferential/proto/inferential_pb2.py" = "inferential/proto/inferential_pb2.py"
+"inferential/proto/inferential_pb2.pyi" = "inferential/proto/inferential_pb2.pyi"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+exclude = ["inferential/proto/inferential_pb2\\.py"]
+
+[[tool.mypy.overrides]]
+module = ["ray.*", "grpc_tools.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = ["inferential/proto/inferential_pb2.py", "inferential/proto/inferential_pb2.pyi"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+"inferential/proto/__init__.py" = ["E402"]

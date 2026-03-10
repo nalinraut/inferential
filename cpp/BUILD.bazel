@@ -1,0 +1,17 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+cc_library(
+    name = "inferential",
+    srcs = ["src/client.cpp"],
+    hdrs = [
+        "include/inferential/client.hpp",
+        "include/inferential/tensor.hpp",
+    ],
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//proto:inferential_cc_proto",
+        "@cppzmq",
+        "@libzmq",
+    ],
+)

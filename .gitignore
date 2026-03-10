@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+.env
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Generated protobuf
+python/inferential/proto/inferential_pb2.py
+python/inferential/proto/inferential_pb2.pyi
+
+# C++ (Bazel)
+/bazel-*
+
+# Rust
+rust/target/

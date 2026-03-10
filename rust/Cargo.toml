@@ -1,0 +1,33 @@
+[package]
+name = "inferential"
+version = "1.0.1"
+edition = "2021"
+description = "Rust client SDK for Inferential inference orchestration"
+license = "MIT"
+repository = "https://github.com/nalinraut/inferential"
+homepage = "https://github.com/nalinraut/inferential"
+documentation = "https://docs.rs/inferential"
+readme = "README.md"
+keywords = ["robotics", "inference", "zmq", "protobuf", "ml"]
+categories = ["science::robotics", "network-programming"]
+include = ["src/**/*", "proto/**/*", "examples/**/*", "build.rs", "README.md", "LICENSE"]
+
+[dependencies]
+prost = "0.13"
+zmq = "0.10"
+zeromq = "0.4"
+tokio = { version = "1", features = ["full"] }
+
+[build-dependencies]
+prost-build = "0.13"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[[example]]
+name = "client_demo"
+path = "examples/client_demo.rs"
+
+[[example]]
+name = "async_client_demo"
+path = "examples/async_client_demo.rs"

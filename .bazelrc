@@ -1,0 +1,8 @@
+build --cxxopt=-std=c++17
+build --host_cxxopt=-std=c++17
+
+# Silence warnings from external dependencies
+build --per_file_copt=external/.*@-w
+
+# Show test output on failure
+test --test_output=errors

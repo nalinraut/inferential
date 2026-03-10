@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify vendored proto is in sync
+        run: diff proto/inferential.proto rust/proto/inferential.proto
+      - name: Verify vendored LICENSE is in sync
+        run: diff LICENSE rust/LICENSE
+
+  lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install uv
+      - run: uv sync --extra dev
+      - run: uv run ruff check inferential/
+      - run: uv run ruff format --check inferential/ tests/
+      - run: uv run mypy inferential/ --ignore-missing-imports
+
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install uv
+      - run: uv sync --extra dev
+      - run: uv run pytest tests/
+
+  test-cpp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check C++ formatting
+        run: |
+          find cpp -name '*.cpp' -o -name '*.hpp' | xargs clang-format --dry-run -Werror
+      - uses: bazel-contrib/setup-bazel@0.14.0
+        with:
+          bazelisk-version: "1.25.0"
+      - run: bazel test //cpp/tests:test_client
+
+  test-rust:
+    needs: check-sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: sudo apt-get update && sudo apt-get install -y libzmq3-dev protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --check
+        working-directory: rust
+      - run: cargo clippy -- -D warnings
+        working-directory: rust
+      - run: cargo test -- --test-threads=1
+        working-directory: rust
