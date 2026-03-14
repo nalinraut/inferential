@@ -25,6 +25,30 @@ Inferential sits between your clients and your ML models. It receives observatio
 - **In-memory metrics** — Ring-buffer storage with label filtering and percentile stats (p50/p95/p99)
 - **Async support** — Python (`AsyncConnection`) and Rust (`AsyncConnection`) async clients
 
+## Metrics
+
+Every request generates metrics across the pipeline, stored in a ring buffer (10,000 points per metric) with p50/p95/p99 percentiles and per-client label filtering.
+
+| Metric | What it captures |
+|--------|-----------------|
+| `inference_latency_ms` | Pure model execution time (Ray Serve) |
+| `scheduling_wait_ms` | Time spent in the scheduler queue |
+| `e2e_latency_ms` | Total server-side delay (queue + inference) |
+| `observation_staleness_ms` | Age of sensor data on arrival |
+| `payload_size_bytes` | Tensor payload size per request |
+| `queue_depth` | Pending requests at dispatch time |
+| `batch_size` | Number of requests dispatched per batch |
+| `queue_full_drops` | Requests dropped due to queue overflow |
+
+Stream to Prometheus, Grafana, or custom handlers:
+
+```python
+@server.on_metric
+def handle(name, value, labels):
+    if name == "observation_staleness_ms" and value > 10:
+        alert(f"Client {labels['client']} staleness: {value:.1f}ms")
+```
+
 ## Architecture
 
 ```
