@@ -10,7 +10,21 @@ permissions:
   contents: write
 
 jobs:
+  upload-tarball:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create and upload source tarball
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          git archive --format=tar.gz --prefix="inferential-${VERSION}/" "${GITHUB_REF_NAME}" \
+            -o "inferential-${VERSION}.tar.gz"
+          gh release upload "${GITHUB_REF_NAME}" "inferential-${VERSION}.tar.gz" --clobber
+
   publish:
+    needs: upload-tarball
     uses: bazel-contrib/publish-to-bcr/.github/workflows/publish.yaml@main
     with:
       tag_name: ${{ github.event.release.tag_name }}
