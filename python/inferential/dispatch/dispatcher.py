@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -126,30 +127,40 @@ class RayDispatcher:
 
         for model_id, model_requests in by_model.items():
             handle = self._get_handle(model_id)
+
+            # Fire all remote calls concurrently so Ray Serve can
+            # load-balance across replicas.
+            starts: list[float] = []
+            obs_dicts: list[dict] = []
             for req in model_requests:
-                start = time.monotonic()
+                obs_dicts.append(self._reconstruct_numpy(req))
+                starts.append(time.monotonic())
+
+            async def _call(req: InferenceRequest, obs: dict, t0: float) -> DispatchResult:
                 try:
-                    obs_dict = self._reconstruct_numpy(req)
-                    result = await handle.infer.remote(obs_dict)
-                    latency = (time.monotonic() - start) * 1000
+                    result = await handle.infer.remote(obs)
+                    latency = (time.monotonic() - t0) * 1000
                     self._update_health(model_id, latency, True)
-                    results.append(self._build_result(req, result, latency))
+                    return self._build_result(req, result, latency)
                 except Exception as e:
-                    latency = (time.monotonic() - start) * 1000
+                    latency = (time.monotonic() - t0) * 1000
                     self._update_health(model_id, latency, False)
                     logger.error("Dispatch failed for client %s: %s", req.client_id, e)
-                    results.append(
-                        DispatchResult(
-                            client_id=req.client_id,
-                            response_id=uuid.uuid4().hex,
-                            identity=req.identity,
-                            envelope=b"",
-                            payload=b"",
-                            latency_ms=latency,
-                            success=False,
-                            error=str(e),
-                        )
+                    return DispatchResult(
+                        client_id=req.client_id,
+                        response_id=uuid.uuid4().hex,
+                        identity=req.identity,
+                        envelope=b"",
+                        payload=b"",
+                        latency_ms=latency,
+                        success=False,
+                        error=str(e),
                     )
+
+            batch_results = await asyncio.gather(
+                *(_call(req, obs, t0) for req, obs, t0 in zip(model_requests, obs_dicts, starts))
+            )
+            results.extend(batch_results)
         return results
 
     def _update_health(self, model_id: str, latency_ms: float, success: bool) -> None:

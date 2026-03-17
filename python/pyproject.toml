@@ -1,6 +1,6 @@
 [project]
 name = "inferential"
-version = "1.0.1"
+version = "1.2.1"
 description = "Robotics-aware inference orchestration on top of Ray Serve"
 readme = "README.md"
 license = "MIT"
