@@ -35,6 +35,7 @@ class SchedulingConfig(BaseModel):
     request_ttl_ms: float = Field(default=5000.0, gt=0)
     overflow_policy: Literal["drop_oldest", "reject_newest"] = "drop_oldest"
     max_retries: int = Field(default=0, ge=0)
+    max_concurrent_dispatch: int = Field(default=8, ge=1)
     deadline_aware: DeadlineAwareConfig = DeadlineAwareConfig()
     batch_optimized: BatchConfig = BatchConfig()
     priority_tiered: TieredConfig = TieredConfig()

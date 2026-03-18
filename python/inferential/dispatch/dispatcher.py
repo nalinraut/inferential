@@ -128,15 +128,12 @@ class RayDispatcher:
         for model_id, model_requests in by_model.items():
             handle = self._get_handle(model_id)
 
-            # Fire all remote calls concurrently so Ray Serve can
-            # load-balance across replicas.
-            starts: list[float] = []
-            obs_dicts: list[dict] = []
-            for req in model_requests:
-                obs_dicts.append(self._reconstruct_numpy(req))
-                starts.append(time.monotonic())
+            # Reconstruct observations up front, then fire all remote
+            # calls concurrently so Ray Serve can load-balance across replicas.
+            obs_dicts = [self._reconstruct_numpy(req) for req in model_requests]
 
-            async def _call(req: InferenceRequest, obs: dict, t0: float) -> DispatchResult:
+            async def _call(req: InferenceRequest, obs: dict) -> DispatchResult:
+                t0 = time.monotonic()
                 try:
                     result = await handle.infer.remote(obs)
                     latency = (time.monotonic() - t0) * 1000
@@ -158,7 +155,7 @@ class RayDispatcher:
                     )
 
             batch_results = await asyncio.gather(
-                *(_call(req, obs, t0) for req, obs, t0 in zip(model_requests, obs_dicts, starts))
+                *(_call(req, obs) for req, obs in zip(model_requests, obs_dicts))
             )
             results.extend(batch_results)
         return results

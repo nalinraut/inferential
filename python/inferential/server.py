@@ -5,6 +5,8 @@ import logging
 import time
 from typing import Any, Callable
 
+import zmq
+
 from inferential.config.schema import InferentialConfig
 from inferential.dispatch.dispatcher import RayDispatcher
 from inferential.metrics.collector import MetricsCollector
@@ -165,6 +167,15 @@ class Server:
                 await asyncio.sleep(0.001)
                 continue
 
+            # Collect more ready requests so the dispatcher can
+            # saturate multiple Ray Serve replicas concurrently.
+            max_concurrent = self._config.scheduling.max_concurrent_dispatch
+            while len(batch) < max_concurrent:
+                more = self._scheduler.next_batch()
+                if not more:
+                    break
+                batch.extend(more)
+
             self._metrics.record("queue_depth", self._scheduler.queue_len())
             self._metrics.record("batch_size", float(len(batch)))
 
@@ -197,13 +208,23 @@ class Server:
                         result.latency_ms,
                         {"client": result.client_id},
                     )
-                    await self._transport.send(
-                        OutgoingResponse(
-                            identity=result.identity,
-                            envelope=result.envelope,
-                            payload=result.payload,
+                    try:
+                        await self._transport.send(
+                            OutgoingResponse(
+                                identity=result.identity,
+                                envelope=result.envelope,
+                                payload=result.payload,
+                            )
                         )
-                    )
+                    except zmq.ZMQError as e:
+                        logger.warning(
+                            "Failed to send response to client %s: %s",
+                            result.client_id,
+                            e,
+                        )
+                        self._metrics.record(
+                            "send_errors", 1.0, {"client": result.client_id}
+                        )
                 else:
                     original = batch_by_id.get(result.client_id)
                     if (
