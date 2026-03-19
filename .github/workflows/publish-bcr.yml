@@ -3,6 +3,12 @@ name: Publish to BCR
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to publish to BCR (e.g. v1.3.0)"
+        required: true
+        type: string
 
 permissions:
   id-token: write
@@ -17,17 +23,18 @@ jobs:
       - name: Create and upload source tarball
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag_name }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          git archive --format=tar.gz --prefix="inferential-${VERSION}/" "${GITHUB_REF_NAME}" \
+          VERSION="${TAG#v}"
+          git archive --format=tar.gz --prefix="inferential-${VERSION}/" "${TAG}" \
             -o "inferential-${VERSION}.tar.gz"
-          gh release upload "${GITHUB_REF_NAME}" "inferential-${VERSION}.tar.gz" --clobber
+          gh release upload "${TAG}" "inferential-${VERSION}.tar.gz" --clobber
 
   publish:
     needs: upload-tarball
     uses: bazel-contrib/publish-to-bcr/.github/workflows/publish.yaml@main
     with:
-      tag_name: ${{ github.event.release.tag_name }}
+      tag_name: ${{ github.event.release.tag_name || inputs.tag_name }}
       registry_fork: nalinraut/bazel-central-registry
       attest: false
     secrets:

@@ -1,38 +1,39 @@
 name: Publish to PyPI
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_run:
+    workflows: [Auto Tag and Release]
+    types: [completed]
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: python
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - run: pip install uv
-      - run: uv sync --extra dev
-      - run: uv run pytest tests/
-      - run: uv run ruff check inferential/
-
   publish:
-    needs: test
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: pip install build
+      - run: pip install build requests
+      - name: Check if version already on PyPI
+        id: check
+        working-directory: python
+        run: |
+          VERSION=$(grep '^version' pyproject.toml | head -1 | cut -d'"' -f2)
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/inferential/${VERSION}/json")
+          if [ "$STATUS" = "200" ]; then
+            echo "inferential==${VERSION} already on PyPI — skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - run: python -m build
         working-directory: python
+        if: steps.check.outputs.skip == 'false'
       - uses: pypa/gh-action-pypi-publish@release/v1
+        if: steps.check.outputs.skip == 'false'
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
           packages-dir: python/dist/

@@ -21,3 +21,4 @@ python/inferential/proto/inferential_pb2.pyi
 
 # Rust
 rust/target/
+rust/.proto/
