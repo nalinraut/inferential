@@ -26,5 +26,5 @@ jobs:
           if [ "$STATUS" = "200" ]; then
             echo "inferential@${VERSION} already on crates.io — skipping"
           else
-            cargo publish
+            cargo publish --allow-dirty
           fi
