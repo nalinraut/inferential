@@ -1,6 +1,6 @@
 [package]
 name = "inferential"
-version = "1.3.0"
+version = "1.3.1"
 edition = "2021"
 description = "Rust client SDK for Inferential inference orchestration"
 license = "MIT"
