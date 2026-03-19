@@ -10,7 +10,7 @@ documentation = "https://docs.rs/inferential"
 readme = "README.md"
 keywords = ["robotics", "inference", "zmq", "protobuf", "ml"]
 categories = ["science::robotics", "network-programming"]
-include = ["src/**/*", "proto/**/*", "examples/**/*", "build.rs", "README.md", "LICENSE"]
+include = ["src/**/*", ".proto/**/*", "examples/**/*", "build.rs", "README.md", "LICENSE"]
 
 [dependencies]
 prost = "0.13"
