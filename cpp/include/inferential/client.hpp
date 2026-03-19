@@ -56,6 +56,7 @@ private:
 class ObservationBuilder {
 public:
     ObservationBuilder& urgency(float u);
+    ObservationBuilder& priority(int p);
     ObservationBuilder& steps_remaining(uint32_t s);
 
     /// Add a raw tensor (caller manages byte layout).
@@ -75,13 +76,14 @@ public:
 private:
     friend class Model;
     ObservationBuilder(Connection* conn, const std::string& client_id,
-                       const std::string& client_type, const std::string& model_id);
+                       const std::string& client_type, const std::string& model_id, int priority);
 
     Connection* conn_;
     std::string client_id_;
     std::string client_type_;
     std::string model_id_;
     float urgency_ = 0.0f;
+    int priority_ = 1;
     std::optional<uint32_t> steps_remaining_;
 
     struct TensorEntry {

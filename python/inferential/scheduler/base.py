@@ -54,6 +54,30 @@ class Scheduler(ABC):
         return age_ms > ttl_ms
 
 
+class ModelAwareScheduler(Scheduler):
+    """Extension for schedulers that support per-model dispatch."""
+
+    @abstractmethod
+    def next_batch_for_model(self, model_id: str) -> list[InferenceRequest]:
+        """Return next batch from a specific model queue. Empty list if none ready."""
+
+    @abstractmethod
+    def models(self) -> list[str]:
+        """Return model IDs that currently have queued requests."""
+
+    @abstractmethod
+    def queue_len_for_model(self, model_id: str) -> int:
+        """Return queue depth for a specific model."""
+
+    def next_batch(self) -> list[InferenceRequest]:
+        """Default: drain from model with highest-scored request."""
+        for model_id in self.models():
+            batch = self.next_batch_for_model(model_id)
+            if batch:
+                return batch
+        return []
+
+
 # --- Registry ---
 
 _SCHEDULER_REGISTRY: dict[str, type[Scheduler]] = {}

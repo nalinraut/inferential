@@ -1,11 +1,14 @@
-"""Async client demo — multiple robots sharing a single connection.
+"""Async robot fleet demo — multiple robots on a single connection.
 
-Unlike the sync client_demo.py which uses threads, this runs all robots
-concurrently on a single thread using asyncio.
+Demonstrates per-model priority with asyncio:
+  - manipulation-policy  priority=0 (high — real-time control)
+  - telemetry            priority=1 (lower — background monitoring)
+
+All robots run concurrently on a single event loop (no threads).
 
 Usage:
     python examples/async_client_demo.py
-    python examples/async_client_demo.py --clients 6 --hz 50 --steps 200
+    python examples/async_client_demo.py --robots 6 --hz 50 --steps 200
 """
 
 from __future__ import annotations
@@ -24,51 +27,59 @@ async def robot_loop(
     hz: float,
     steps: int,
 ) -> None:
-    model = conn.model("policy-v2", latency_budget_ms=1000 / hz)
+    # Two models with different priorities
+    policy = conn.model("manipulation-policy", latency_budget_ms=1000 / hz, priority=0)
+    telemetry = conn.model("telemetry", latency_budget_ms=200.0, priority=1)
+
     interval = 1.0 / hz
-    received = 0
+    policy_received = 0
 
     print(f"[{robot_id}] starting — {hz}Hz, {steps} steps")
 
     for step in range(steps):
         state = np.random.randn(7).astype(np.float32)
-        await model.observe(
-            urgency=0.5,
+
+        # High-priority control observation
+        await policy.observe(
+            urgency=min(1.0, (steps - step) / steps),
             steps_remaining=steps - step,
             state=state,
         )
 
-        result = await model.get_result(timeout_ms=int(interval * 1000))
+        # Low-priority telemetry every 5 steps
+        if step % 5 == 0:
+            await telemetry.observe(
+                urgency=0.1,
+                joint_positions=state,
+            )
+
+        result = await policy.get_result(timeout_ms=int(interval * 1000))
         if result is not None:
-            received += 1
+            policy_received += 1
             if step % 20 == 0:
                 actions = result["actions"]
-                latency = result["inference_latency_ms"]
-                print(
-                    f"[{robot_id}] step {step}: "
-                    f"actions={actions[:3]}... latency={latency:.1f}ms"
-                )
+                print(f"[{robot_id}] step {step}: actions={actions[:3]}...")
 
         await asyncio.sleep(interval)
 
-    print(f"[{robot_id}] done — received {received}/{steps} responses")
+    print(f"[{robot_id}] done — policy responses: {policy_received}/{steps}")
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(description="Inferential async client demo")
+    parser = argparse.ArgumentParser(description="Inferential async robot fleet demo")
     parser.add_argument("--server", default="tcp://localhost:5555")
-    parser.add_argument("--clients", type=int, default=3, help="Number of robots")
-    parser.add_argument("--hz", type=float, default=20.0, help="Request frequency per robot")
+    parser.add_argument("--robots", type=int, default=3, help="Number of robots")
+    parser.add_argument("--hz", type=float, default=20.0, help="Control frequency per robot")
     parser.add_argument("--steps", type=int, default=100, help="Steps per robot")
     args = parser.parse_args()
 
     async with AsyncConnection(
-        server=args.server, client_id="async-cell", client_type="sim"
+        server=args.server, client_id="fleet-controller", client_type="franka"
     ) as conn:
         await asyncio.gather(
             *(
-                robot_loop(conn, f"bot-{i + 1:02d}", args.hz, args.steps)
-                for i in range(args.clients)
+                robot_loop(conn, f"robot-{i + 1:02d}", args.hz, args.steps)
+                for i in range(args.robots)
             )
         )
 

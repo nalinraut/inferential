@@ -55,6 +55,7 @@ message Observation {
     string model_id = 5;
     optional uint32 steps_remaining = 6;
     map<string, string> metadata = 7;
+    uint32 priority = 8;         // 0 = highest priority
 }
 ```
 
@@ -142,14 +143,65 @@ Connection(server, client_id, client_type)
 
 ## Schedulers
 
-Four built-in strategies. Each implements the `Scheduler` ABC and can be used standalone or via the server.
+Six built-in strategies. Each implements the `Scheduler` ABC and can be used standalone or via the server.
 
 | Strategy | Data Structure | Description |
 |----------|---------------|-------------|
-| `deadline_aware` | heapq | Weighted scoring: cadence, urgency, priority, age (default) |
+| `deadline_aware` | heapq | Weighted scoring: cadence, urgency, priority, age |
+| `model_deadline` | per-model heapq | Per-model queues with deadline-aware scoring (default, recommended) |
+| `tiered_deadline` | per-tier heapq | Legacy per-priority-tier isolation with deadline-aware scoring |
 | `batch_optimized` | dict of deques | Groups requests per model, flushes on size or time threshold |
 | `priority_tiered` | list of deques | Strict priority tiers (0=highest), FIFO within each tier |
 | `round_robin` | OrderedDict of deques | Fair rotation across clients |
+
+### Model Deadline Scheduling
+
+The `model_deadline` scheduler routes requests by `model_id` into per-model heaps. Within each model queue, requests are ordered by a deadline-aware score that factors in cadence, urgency, priority, steps remaining, and age. Priority (sent by the client) is a scoring factor, not a routing key.
+
+```
+              _receive_loop()
+                    |
+            scheduler.submit()
+              /           \
+    "policy" heap       "telemetry" heap
+         |                     |
+ _model_dispatch_loop       _model_dispatch_loop
+     semaphore(3)               semaphore(1)
+```
+
+When combined with **pipeline dispatch**, each model gets its own dispatch loop with a semaphore bounded to `max_inflight` (matching the model's Ray Serve replica count). Models are registered dynamically — when the first request for a new model arrives, the server spins up its dispatch loop.
+
+```python
+config = InferentialConfig(
+    models={
+        "known": {
+            "manipulation-policy": {"max_inflight": 3},
+            "telemetry": {"max_inflight": 1},
+        },
+        "default_max_inflight": 2,
+    },
+    scheduling={
+        "strategy": "model_deadline",
+        "pipeline_dispatch": {"enabled": True},
+    },
+)
+```
+
+### Priority and Urgency
+
+Priority and urgency are separate dimensions, both set by the client:
+
+- **Priority** (`uint32`, 0=highest): Determines scoring weight within the queue. Set at `conn.model()` time, can be overridden per-observation.
+- **Urgency** (`float`, 0.0-1.0): How time-critical this specific observation is. Higher urgency = dispatched sooner within the same priority level.
+
+```python
+conn = Connection(server="tcp://localhost:5555", client_id="station-01", client_type="franka")
+manip = conn.model("manipulation-policy", priority=0)   # high priority
+telemetry = conn.model("telemetry", priority=1)          # lower priority
+
+manip.observe(urgency=0.5, state=state)                  # normal
+manip.observe(urgency=1.0, priority=0, state=state)      # emergency override
+```
 
 ### Custom Scheduling
 
@@ -159,7 +211,7 @@ Schedulers are configured server-side (Python):
 # Swap strategy
 server.use_scheduler("round_robin")
 
-# Custom scoring policy for deadline-aware
+# Custom scoring policy for deadline-aware or model_deadline
 from inferential import register_policy, InferenceRequest
 
 @register_policy("safety_first")
@@ -168,7 +220,7 @@ def score(req: InferenceRequest) -> float:
         return 1000.0
     return req.priority * 10.0
 
-server.use_scheduler("deadline_aware", policy="safety_first")
+server.use_scheduler("model_deadline", policy="safety_first")
 ```
 
 See the [Python SDK docs](../python/) for full scheduler and server configuration details.
@@ -182,6 +234,19 @@ The scheduler queue supports TTL, overflow policies, and dispatch retry:
 | `request_ttl_ms` | 5000 | Drop queued requests older than this |
 | `overflow_policy` | `"drop_oldest"` | What to do when the queue is full |
 | `max_retries` | 0 | Re-queue failed dispatches up to N times |
+| `max_concurrent_dispatch` | 8 | Max requests dispatched concurrently (legacy loop) |
+
+### Pipeline Dispatch
+
+When `pipeline_dispatch.enabled = True` and the scheduler is model-aware (`model_deadline`), the server runs a separate dispatch coroutine per model. Each model has a semaphore bounded to its `max_inflight` value, matching the model's Ray Serve replica count.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `pipeline_dispatch.enabled` | `false` | Enable per-model dispatch loops |
+| `models.known.<id>.max_inflight` | — | Max concurrent dispatches for a known model |
+| `models.default_max_inflight` | 2 | Fallback for unknown models |
+
+Dispatch loops are created dynamically when the first request for a model arrives, using `asyncio.Event` for instant wake-up (no polling delay).
 
 ## Metrics
 
@@ -191,30 +256,42 @@ In-memory ring-buffer metrics with label filtering and percentile stats.
 
 | Metric | Labels | Description |
 |--------|--------|-------------|
-| `inference_latency_ms` | `client` | Time spent in Ray Serve model |
-| `scheduling_wait_ms` | `client` | Time request sat in queue before dispatch |
-| `e2e_latency_ms` | `client` | Total server-side time (queue wait + inference) |
+| `inference_latency_ms` | `client`, `model`* | Time spent in Ray Serve model |
+| `scheduling_wait_ms` | `client`, `model`* | Time request sat in queue before dispatch |
+| `e2e_latency_ms` | `client`, `model`* | Total server-side time (queue wait + inference) |
 | `observation_staleness_ms` | `client` | Age of observation on arrival |
 | `payload_size_bytes` | `client` | Size of binary tensor payload |
-| `queue_depth` | — | Scheduler queue length at dispatch time |
-| `batch_size` | — | Number of requests per dispatch batch |
+| `queue_depth` | `model`* | Scheduler queue length at dispatch time |
+| `batch_size` | — | Number of requests per dispatch batch (legacy loop) |
 | `active_clients` | — | Currently connected client count |
 | `queue_full_drops` | `client` | Requests dropped due to full queue |
 | `dispatch_errors` | `client`, `error` | Failed dispatches (after retries exhausted) |
-| `dispatch_retries` | `client` | Dispatch retry attempts |
+| `dispatch_retries` | `client`, `model`* | Dispatch retry attempts |
+| `send_errors` | `client` | ZMQ response send failures |
 | `requests_expired` | — | Requests dropped by TTL |
 | `observation_errors` | — | Malformed observations |
 | `client_disconnected` | `client` | Client disconnect events |
+
+\* `model` label is present when using pipeline dispatch with a model-aware scheduler (`model_deadline`). In the legacy dispatch loop, these metrics have no `model` label.
 
 ### Querying Metrics (Python)
 
 ```python
 @server.on_metric
 def log(name, value, labels):
-    print(f"{name}: {value}")
+    model = labels.get("model", "all")
+    print(f"[{model}] {name}: {value}")
 
+# Global stats
 stats = server.metrics.get_stats("inference_latency_ms", window_seconds=60)
 print(f"p95: {stats.p95:.1f}ms")
+
+# Per-model queue depth
+policy_depth = server.metrics.get_latest("queue_depth", labels={"model": "manipulation-policy"})
+telemetry_depth = server.metrics.get_latest("queue_depth", labels={"model": "telemetry"})
+
+# Per-model latency stats
+policy_e2e = server.metrics.get_stats("e2e_latency_ms", labels={"model": "manipulation-policy"})
 ```
 
 ## Configuration
@@ -227,21 +304,52 @@ from inferential.config import InferentialConfig
 config = InferentialConfig(
     transport={"bind": "tcp://*:5555", "recv_hwm": 2000},
     scheduling={
-        "strategy": "deadline_aware",
+        "strategy": "model_deadline",
         "max_queue_size": 500,
         "request_ttl_ms": 3000,
         "overflow_policy": "drop_oldest",
         "max_retries": 1,
+        "pipeline_dispatch": {"enabled": True},
+    },
+    models={
+        "known": {
+            "manipulation-policy": {"max_inflight": 3},
+            "telemetry": {"max_inflight": 1},
+        },
+        "default_max_inflight": 2,
     },
     clients={
-        "defaults": {"latency_budget_ms": 50.0, "priority": 1},
+        "defaults": {"latency_budget_ms": 50.0},
         "known": [
-            {"id": "agent-01", "model": "policy-v2", "latency_budget_ms": 30.0, "priority": 2},
+            {"id": "agent-01", "model": "policy-v2", "latency_budget_ms": 30.0},
         ],
         "accept_unknown": True,
     },
     response_tracking={"cadence_alpha": 0.3, "disconnect_timeout_s": 10.0},
     metrics={"ring_buffer_size": 10000},
+)
+
+server = Server(config=config)
+```
+
+### Model Deadline with Pipeline Dispatch
+
+```python
+from inferential import Server
+from inferential.config.schema import InferentialConfig
+
+config = InferentialConfig(
+    models={
+        "known": {
+            "manipulation-policy": {"max_inflight": 3},
+            "telemetry": {"max_inflight": 1},
+        },
+        "default_max_inflight": 2,
+    },
+    scheduling={
+        "strategy": "model_deadline",
+        "pipeline_dispatch": {"enabled": True},
+    },
 )
 
 server = Server(config=config)

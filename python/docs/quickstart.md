@@ -76,7 +76,8 @@ import numpy as np
 from inferential import Connection
 
 conn = Connection(server="tcp://localhost:5555", client_id="demo-01", client_type="sim")
-model = conn.model("policy-v2", latency_budget_ms=50.0)
+# priority=0 is highest; lower-priority clients yield GPU slots under contention
+model = conn.model("policy-v2", latency_budget_ms=50.0, priority=0)
 
 for step in range(10):
     state = np.random.randn(7).astype(np.float32)
@@ -131,7 +132,7 @@ async def main():
     async with AsyncConnection(
         server="tcp://localhost:5555", client_id="async-01", client_type="sim"
     ) as conn:
-        model = conn.model("policy-v2", latency_budget_ms=50.0)
+        model = conn.model("policy-v2", latency_budget_ms=50.0, priority=0)
 
         for step in range(10):
             state = np.random.randn(7).astype(np.float32)
@@ -164,6 +165,30 @@ ray stop
 ```
 
 ## Next Steps
+
+### Multi-model with priority scheduling
+
+For production use with multiple models (e.g. a manipulation policy and a telemetry stream), use `model_deadline` + per-model concurrency limits:
+
+```python
+from inferential.config.schema import InferentialConfig, ModelConfig, ModelsConfig
+
+config = InferentialConfig(
+    models=ModelsConfig(
+        known={
+            "manipulation-policy": ModelConfig(max_inflight=4),  # 4 GPU replicas
+            "telemetry":           ModelConfig(max_inflight=1),
+        },
+    ),
+)
+config.transport.bind = "tcp://*:5555"
+config.scheduling.strategy = "model_deadline"
+config.scheduling.pipeline_dispatch.enabled = True
+
+server = Server(config=config, models=["manipulation-policy", "telemetry"])
+```
+
+`max_inflight` should match `num_replicas` on your Ray Serve deployment. This keeps one request queued per GPU at the scheduler level — so priority ordering is always respected before a request reaches Ray Serve.
 
 - [Architecture](../../docs/architecture.md) — system design, wire protocol, schedulers, configuration reference
 - [Examples](../../docs/examples.md) — multi-language client demos, server extensions, custom schedulers

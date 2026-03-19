@@ -67,7 +67,7 @@ _DTYPE_TO_NUMPY: dict[DType, np.dtype] = {
     FLOAT16: np.dtype("float16"),
     FLOAT32: np.dtype("float32"),
     FLOAT64: np.dtype("float64"),
-    BFLOAT16: np.dtype("float16"),  # closest numpy equivalent
+    BFLOAT16: np.dtype("uint16"),  # bfloat16 has no numpy equivalent; raw bytes preserved
     UINT8: np.dtype("uint8"),
     INT32: np.dtype("int32"),
     INT64: np.dtype("int64"),

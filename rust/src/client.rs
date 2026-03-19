@@ -90,7 +90,7 @@ impl Connection {
 
         let frames = match self.socket.recv_multipart(0) {
             Ok(f) => f,
-            Err(zmq::Error::EAGAIN) => return None,
+            Err(zmq::Error::EAGAIN) | Err(zmq::Error::ETERM) => return None,
             Err(e) => panic!("recv error: {}", e),
         };
 
@@ -124,6 +124,7 @@ impl<'a> Model<'a> {
             conn: self.conn,
             model_id: &self.model_id,
             urgency: 0.0,
+            priority: self._priority as u32,
             steps_remaining: None,
             tensors: Vec::new(),
             metadata: Vec::new(),
@@ -199,6 +200,7 @@ pub struct ObservationBuilder<'a> {
     conn: &'a Connection,
     model_id: &'a str,
     urgency: f32,
+    priority: u32,
     steps_remaining: Option<u32>,
     tensors: Vec<TensorEntry>,
     metadata: Vec<(String, String)>,
@@ -214,6 +216,11 @@ struct TensorEntry {
 impl<'a> ObservationBuilder<'a> {
     pub fn urgency(mut self, u: f32) -> Self {
         self.urgency = u;
+        self
+    }
+
+    pub fn priority(mut self, p: u32) -> Self {
+        self.priority = p;
         self
     }
 
@@ -279,6 +286,7 @@ impl<'a> ObservationBuilder<'a> {
             model_id: self.model_id.to_string(),
             steps_remaining: self.steps_remaining,
             metadata: self.metadata.into_iter().collect(),
+            priority: self.priority,
         };
 
         let envelope = obs.encode_to_vec();

@@ -34,6 +34,7 @@ class DispatchResult:
     payload: bytes
     latency_ms: float
     success: bool
+    req_id: int = 0  # id(InferenceRequest) — used to look up the original request
     error: str | None = None
 
 
@@ -117,6 +118,7 @@ class RayDispatcher:
             payload=payload,
             latency_ms=latency_ms,
             success=True,
+            req_id=id(req),
         )
 
     async def dispatch(self, requests: list[InferenceRequest]) -> list[DispatchResult]:
@@ -151,6 +153,7 @@ class RayDispatcher:
                         payload=b"",
                         latency_ms=latency,
                         success=False,
+                        req_id=id(req),
                         error=str(e),
                     )
 

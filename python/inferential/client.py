@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import time
 from typing import Any
 
@@ -25,6 +26,7 @@ def _build_observation(
     model_id: str,
     urgency: float,
     steps_remaining: int | None,
+    priority: int = 1,
     **kwargs: Any,
 ) -> tuple[bytes, bytes]:
     obs = Observation()
@@ -32,6 +34,7 @@ def _build_observation(
     obs.model_id = model_id
     obs.timestamp_ns = int(time.time() * 1_000_000_000)
     obs.urgency = urgency
+    obs.priority = priority
     if steps_remaining is not None:
         obs.steps_remaining = steps_remaining
 
@@ -124,6 +127,30 @@ class Connection:
         self._socket = self._ctx.socket(zmq.DEALER)
         _configure_socket(self._socket, client_id, reconnect_ivl_ms, reconnect_max_ms)
         self._socket.connect(_normalize_server(server))
+        # Per-model response buffers — routes responses to the correct Model.get_result()
+        self._buffers: dict[str, collections.deque[tuple[bytes, bytes]]] = collections.defaultdict(
+            collections.deque
+        )
+
+    def _drain(self) -> None:
+        while self._socket.poll(0, zmq.POLLIN):
+            frames = self._socket.recv_multipart(zmq.NOBLOCK)
+            env = frames[1] if len(frames) > 1 else b""
+            pay = frames[2] if len(frames) > 2 else b""
+            resp = ModelResponse()
+            resp.ParseFromString(env)
+            self._buffers[resp.model_id].append((env, pay))
+
+    def _recv_for_model(self, model_id: str, timeout_ms: int) -> tuple[bytes, bytes] | None:
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while True:
+            self._drain()
+            if self._buffers[model_id]:
+                return self._buffers[model_id].popleft()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            self._socket.poll(int(min(remaining * 1000, 50)), zmq.POLLIN)
 
     def model(
         self,
@@ -140,19 +167,6 @@ class Connection:
 
     def _send(self, envelope: bytes, payload: bytes) -> None:
         self._socket.send_multipart([b"", envelope, payload])
-
-    def _recv(self, timeout_ms: int = 0) -> tuple[bytes, bytes] | None:
-        if timeout_ms > 0:
-            if self._socket.poll(timeout_ms, zmq.POLLIN) == 0:
-                return None
-        elif not self._socket.poll(0, zmq.POLLIN):
-            return None
-
-        frames = self._socket.recv_multipart(zmq.NOBLOCK)
-        # frames = [b'', envelope, payload]
-        envelope = frames[1] if len(frames) > 1 else b""
-        payload = frames[2] if len(frames) > 2 else b""
-        return envelope, payload
 
     def close(self) -> None:
         self._socket.close()
@@ -176,6 +190,7 @@ class Model:
         self,
         urgency: float = 0.0,
         steps_remaining: int | None = None,
+        priority: int | None = None,
         **kwargs: Any,
     ) -> None:
         envelope, payload = _build_observation(
@@ -184,12 +199,13 @@ class Model:
             self._model_id,
             urgency,
             steps_remaining,
+            priority=priority if priority is not None else self._priority,
             **kwargs,
         )
         self._conn._send(envelope, payload)
 
     def get_result(self, timeout_ms: int = 100) -> dict | None:
-        result = self._conn._recv(timeout_ms)
+        result = self._conn._recv_for_model(self._model_id, timeout_ms)
         if result is None:
             return None
         return _parse_response(*result)
@@ -216,6 +232,23 @@ class AsyncConnection:
         self._socket = self._ctx.socket(zmq.DEALER)
         _configure_socket(self._socket, client_id, reconnect_ivl_ms, reconnect_max_ms)
         self._socket.connect(_normalize_server(server))
+        # Per-model response queues — a single reader task routes all incoming messages
+        self._queues: dict[str, asyncio.Queue[tuple[bytes, bytes]]] = {}
+        self._reader_task: asyncio.Task | None = None
+
+    def _ensure_reader(self) -> None:
+        if self._reader_task is None or self._reader_task.done():
+            self._reader_task = asyncio.create_task(self._reader_loop())
+
+    async def _reader_loop(self) -> None:
+        while True:
+            frames = await self._socket.recv_multipart()
+            env = frames[1] if len(frames) > 1 else b""
+            pay = frames[2] if len(frames) > 2 else b""
+            resp = ModelResponse()
+            resp.ParseFromString(env)
+            q = self._queues.setdefault(resp.model_id, asyncio.Queue())
+            await q.put((env, pay))
 
     def model(
         self,
@@ -231,21 +264,23 @@ class AsyncConnection:
         )
 
     async def _send(self, envelope: bytes, payload: bytes) -> None:
+        self._ensure_reader()
         await self._socket.send_multipart([b"", envelope, payload])
 
-    async def _recv(self, timeout_ms: int = 0) -> tuple[bytes, bytes] | None:
+    async def _recv_for_model(self, model_id: str, timeout_ms: int) -> tuple[bytes, bytes] | None:
+        self._ensure_reader()
+        q = self._queues.setdefault(model_id, asyncio.Queue())
         try:
-            frames = await asyncio.wait_for(
-                self._socket.recv_multipart(),
-                timeout=timeout_ms / 1000 if timeout_ms > 0 else 0,
+            return await asyncio.wait_for(
+                q.get(),
+                timeout=timeout_ms / 1000 if timeout_ms > 0 else None,
             )
         except (asyncio.TimeoutError, TimeoutError):
             return None
-        envelope = frames[1] if len(frames) > 1 else b""
-        payload = frames[2] if len(frames) > 2 else b""
-        return envelope, payload
 
     def close(self) -> None:
+        if self._reader_task is not None:
+            self._reader_task.cancel()
         self._socket.close()
         self._ctx.term()
 
@@ -273,6 +308,7 @@ class AsyncModel:
         self,
         urgency: float = 0.0,
         steps_remaining: int | None = None,
+        priority: int | None = None,
         **kwargs: Any,
     ) -> None:
         envelope, payload = _build_observation(
@@ -281,12 +317,13 @@ class AsyncModel:
             self._model_id,
             urgency,
             steps_remaining,
+            priority=priority if priority is not None else self._priority,
             **kwargs,
         )
         await self._conn._send(envelope, payload)
 
     async def get_result(self, timeout_ms: int = 100) -> dict | None:
-        result = await self._conn._recv(timeout_ms)
+        result = await self._conn._recv_for_model(self._model_id, timeout_ms)
         if result is None:
             return None
         return _parse_response(*result)

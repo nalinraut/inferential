@@ -18,7 +18,7 @@ Inferential sits between your clients and your ML models. It receives observatio
 
 - **ZMQ transport** — ROUTER/DEALER sockets with automatic reconnection and zero-copy tensor payloads
 - **Multi-language SDKs** — Python, C++, and Rust clients sharing the same protobuf wire protocol
-- **Pluggable schedulers** — Deadline-aware (default), batch-optimized, priority-tiered, round-robin
+- **Pluggable schedulers** — Deadline-aware (default), model-deadline (per-model queues), batch-optimized, priority-tiered, round-robin
 - **Cadence learning** — EMA-based tracking of each client's request pattern to predict urgency
 - **Protobuf wire protocol** — Typed tensor metadata (dtype, shape, encoding) with binary payload
 - **Queue management** — Request TTL, drop-oldest overflow policy, dispatch retry
@@ -29,24 +29,26 @@ Inferential sits between your clients and your ML models. It receives observatio
 
 Every request generates metrics across the pipeline, stored in a ring buffer (10,000 points per metric) with p50/p95/p99 percentiles and per-client label filtering.
 
-| Metric | What it captures |
-|--------|-----------------|
-| `inference_latency_ms` | Pure model execution time (Ray Serve) |
-| `scheduling_wait_ms` | Time spent in the scheduler queue |
-| `e2e_latency_ms` | Total server-side delay (queue + inference) |
-| `observation_staleness_ms` | Age of sensor data on arrival |
-| `payload_size_bytes` | Tensor payload size per request |
-| `queue_depth` | Pending requests at dispatch time |
-| `batch_size` | Number of requests dispatched per batch |
-| `queue_full_drops` | Requests dropped due to queue overflow |
+| Metric | Labels | What it captures |
+|--------|--------|-----------------|
+| `inference_latency_ms` | `client`, `model` | Pure model execution time (Ray Serve) |
+| `scheduling_wait_ms` | `client`, `model` | Time spent in the scheduler queue |
+| `e2e_latency_ms` | `client`, `model` | Total server-side delay (queue + inference) |
+| `observation_staleness_ms` | `client` | Age of sensor data on arrival |
+| `queue_depth` | `model` | Pending requests at dispatch time (per-model with pipeline dispatch) |
+| `queue_full_drops` | `client` | Requests dropped due to queue overflow |
 
-Stream to Prometheus, Grafana, or custom handlers:
+All metrics support label-based filtering. With `model_deadline` + pipeline dispatch, metrics include a `model` label for per-queue observability:
 
 ```python
 @server.on_metric
 def handle(name, value, labels):
-    if name == "observation_staleness_ms" and value > 10:
-        alert(f"Client {labels['client']} staleness: {value:.1f}ms")
+    model = labels.get("model", "all")
+    if name == "queue_depth":
+        print(f"{model} depth: {value}")
+
+# Per-model stats
+stats = server.metrics.get_stats("e2e_latency_ms", labels={"model": "manipulation-policy"})
 ```
 
 ## Architecture
@@ -56,14 +58,13 @@ def handle(name, value, labels):
                   ┌──────────────────────────────┐
                   │                              │
   Client A ──ZMQ──┤  Assembler ──► Scheduler     │
-  Client B ──ZMQ──┤                  │           │
-  Client C ──ZMQ──┤              next_batch()    │
-                  │                  │           │
-                  │              Dispatcher ─────┼──► Ray Serve
-                  │                  │           │    (model replicas)
-                  │              responses       │
-                  │                  │           │
-  Client A ◄─ZMQ─┤  Transport ◄────┘           │
+  Client B ──ZMQ──┤           ┌────┴────┐       │
+  Client C ──ZMQ──┤       "policy"  "telemetry"  │
+                  │           │          │       │
+                  │       Dispatch   Dispatch ───┼──► Ray Serve
+                  │        (sem 3)    (sem 1)    │    (per-model replicas)
+                  │           └────┬────┘        │
+  Client A ◄─ZMQ─┤  Transport ◄───┘             │
   Client B ◄─ZMQ─┤                              │
   Client C ◄─ZMQ─┤  Metrics   Cadence   Health  │
                   └──────────────────────────────┘
@@ -82,7 +83,7 @@ pip install inferential
 cargo add inferential
 
 # C++ (Bazel — add to MODULE.bazel)
-bazel_dep(name = "inferential", version = "1.0.1")
+bazel_dep(name = "inferential", version = "1.2.1")
 ```
 
 ## Client SDKs
@@ -105,10 +106,11 @@ import numpy as np
 from inferential import Connection
 
 conn = Connection(server="tcp://localhost:5555", client_id="agent-01", client_type="franka")
-model = conn.model("policy-v2", latency_budget_ms=30.0)
+# priority=0 is highest; yields GPU slots to lower-priority peers under contention
+model = conn.model("manipulation-policy", latency_budget_ms=30.0, priority=0)
 
 state = np.random.randn(7).astype(np.float32)
-model.observe(urgency=0.8, state=state)
+model.observe(urgency=0.8, steps_remaining=50, state=state)
 
 result = model.get_result(timeout_ms=50)
 if result is not None:
@@ -166,13 +168,26 @@ The server runs on Python with Ray Serve. See the [Python SDK](python/) for serv
 ```python
 import asyncio
 from inferential import Server
+from inferential.config.schema import InferentialConfig, ModelConfig, ModelsConfig
 
-server = Server(bind="tcp://*:5555", models=["policy-v2"])
+config = InferentialConfig(
+    models=ModelsConfig(
+        known={
+            "manipulation-policy": ModelConfig(max_inflight=4),  # match GPU replica count
+            "telemetry":           ModelConfig(max_inflight=1),
+        },
+    ),
+)
+config.transport.bind = "tcp://*:5555"
+config.scheduling.strategy = "model_deadline"
+config.scheduling.pipeline_dispatch.enabled = True
+
+server = Server(config=config, models=["manipulation-policy", "telemetry"])
 
 @server.on_metric
 def log(name, value, labels):
-    if name == "inference_latency_ms":
-        print(f"Client {labels.get('client')}: {value:.1f}ms")
+    if name == "e2e_latency_ms":
+        print(f"[{labels.get('model')}/{labels.get('client')}] {value:.1f}ms")
 
 asyncio.run(server.run())
 ```

@@ -115,11 +115,21 @@ std::optional<std::pair<std::string, std::string>> Connection::recv(int timeout_
 // ---------------------------------------------------------------------------
 
 ObservationBuilder::ObservationBuilder(Connection* conn, const std::string& client_id,
-                                       const std::string& client_type, const std::string& model_id)
-    : conn_(conn), client_id_(client_id), client_type_(client_type), model_id_(model_id) {}
+                                       const std::string& client_type, const std::string& model_id,
+                                       int priority)
+    : conn_(conn),
+      client_id_(client_id),
+      client_type_(client_type),
+      model_id_(model_id),
+      priority_(priority) {}
 
 ObservationBuilder& ObservationBuilder::urgency(float u) {
     urgency_ = u;
+    return *this;
+}
+
+ObservationBuilder& ObservationBuilder::priority(int p) {
+    priority_ = p;
     return *this;
 }
 
@@ -162,6 +172,7 @@ void ObservationBuilder::send() {
     obs.set_model_id(model_id_);
     obs.set_timestamp_ns(Connection::now_ns());
     obs.set_urgency(urgency_);
+    obs.set_priority(priority_);
 
     if (steps_remaining_.has_value()) {
         obs.set_steps_remaining(steps_remaining_.value());
@@ -207,7 +218,7 @@ Model::Model(Connection* conn, const std::string& model_id, float latency_budget
       priority_(priority) {}
 
 ObservationBuilder Model::observe() {
-    return ObservationBuilder(conn_, conn_->client_id_, conn_->client_type_, model_id_);
+    return ObservationBuilder(conn_, conn_->client_id_, conn_->client_type_, model_id_, priority_);
 }
 
 std::optional<std::unordered_map<std::string, TensorData>> Model::get_result(int timeout_ms) {

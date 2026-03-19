@@ -12,7 +12,7 @@ ray start --head
 python examples/server_demo.py
 ```
 
-Wait for `Application 'policy-v2' is ready`. The server runs a `MockPolicy` that echoes random actions of the same dimension as the input.
+Wait for both applications to be ready. The server runs two mock models: `manipulation-policy` (heavier, higher priority) and `telemetry` (lightweight).
 
 See the [Python quickstart](../python/docs/quickstart.md) for full server setup details.
 
@@ -38,17 +38,25 @@ The sync demo spawns one thread per client. The async demo runs all robots concu
 from inferential import Connection
 import numpy as np
 
-conn = Connection(server="tcp://localhost:5555", client_id="sim-01", client_type="sim")
-model = conn.model("policy-v2", latency_budget_ms=30.0)
+conn = Connection(server="tcp://localhost:5555", client_id="arm-01", client_type="franka")
 
-for step in range(100):
-    state = np.random.randn(7).astype(np.float32)
-    model.observe(urgency=0.5, state=state)
+# priority=0 → highest priority; scheduler scores this client above lower-priority peers
+policy  = conn.model("manipulation-policy", latency_budget_ms=30.0, priority=0)
+telemetry = conn.model("telemetry", latency_budget_ms=100.0, priority=1)
 
-    result = model.get_result(timeout_ms=100)
+steps = 50
+for step in range(steps):
+    state = np.random.randn(14).astype(np.float32)
+    urgency = min(1.0, (steps - step) / steps)
+    policy.observe(urgency=urgency, steps_remaining=steps - step, state=state)
+
+    result = policy.get_result(timeout_ms=100)
     if result is not None:
         actions = result["actions"]
         print(f"step {step}: actions={actions[:3]}...")
+
+    if step % 5 == 0:
+        telemetry.observe(urgency=0.1, state=state)
 
 conn.close()
 ```
@@ -59,20 +67,21 @@ conn.close()
 from inferential import AsyncConnection
 import numpy as np, asyncio
 
-async def robot_loop(conn, bot_id, steps):
-    model = conn.model("policy-v2", latency_budget_ms=30.0)
+async def robot_loop(conn, client_id, model_name, priority, steps):
+    model = conn.model(model_name, latency_budget_ms=30.0, priority=priority)
     for step in range(steps):
-        state = np.random.randn(7).astype(np.float32)
-        await model.observe(urgency=0.5, state=state)
+        state = np.random.randn(14).astype(np.float32)
+        urgency = min(1.0, (steps - step) / steps)
+        await model.observe(urgency=urgency, steps_remaining=steps - step, state=state)
         result = await model.get_result(timeout_ms=100)
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.02)
 
 async def main():
     async with AsyncConnection(server="tcp://localhost:5555", client_id="cell") as conn:
         await asyncio.gather(
-            robot_loop(conn, "bot-01", 100),
-            robot_loop(conn, "bot-02", 100),
-            robot_loop(conn, "bot-03", 100),
+            robot_loop(conn, "arm-01", "manipulation-policy", 0, 100),
+            robot_loop(conn, "arm-02", "manipulation-policy", 0, 100),
+            robot_loop(conn, "arm-03", "telemetry",           1, 100),
         )
 
 asyncio.run(main())
@@ -93,17 +102,22 @@ bazel-bin/cpp/examples/client_demo
 #include <vector>
 
 int main() {
-    auto conn = inferential::Connection("tcp://localhost:5555", "cpp-agent", "sim");
-    auto model = conn.model("policy-v2", 30.0f, 1);
+    auto conn = inferential::Connection("tcp://localhost:5555", "arm-01", "franka");
+    // priority=0 → highest; matches P0 manipulation robots in the demo
+    auto policy   = conn.model("manipulation-policy", 30.0f, 0);
+    auto telemetry = conn.model("telemetry", 100.0f, 1);
 
-    for (int step = 0; step < 100; ++step) {
-        std::vector<float> state(7, static_cast<float>(step) * 0.1f);
-        model.observe()
-            .urgency(0.5f)
-            .tensor_f32("state", state.data(), state.size(), {7})
+    int steps = 100;
+    for (int step = 0; step < steps; ++step) {
+        std::vector<float> state(14, static_cast<float>(step) * 0.1f);
+        float urgency = std::min(1.0f, static_cast<float>(steps - step) / steps);
+        policy.observe()
+            .urgency(urgency)
+            .steps_remaining(steps - step)
+            .tensor_f32("state", state.data(), state.size(), {14})
             .send();
 
-        auto result = model.get_result(100);
+        auto result = policy.get_result(100);
         if (result) {
             auto [ptr, count] = (*result)["actions"].as<float>();
             std::cout << "step " << step << ": actions=[";
@@ -111,8 +125,12 @@ int main() {
                 std::cout << ptr[i] << " ";
             std::cout << "...]" << std::endl;
         }
+
+        if (step % 5 == 0) {
+            telemetry.observe().urgency(0.1f)
+                .tensor_f32("state", state.data(), state.size(), {14}).send();
+        }
     }
-    // conn closes automatically via destructor
 }
 ```
 
@@ -132,19 +150,29 @@ cargo run --example async_client_demo
 use inferential::Connection;
 
 fn main() {
-    let conn = Connection::new("tcp://localhost:5555", "rust-agent", "sim");
-    let model = conn.model("policy-v2", 30.0, 1);
+    let conn = Connection::new("tcp://localhost:5555", "arm-01", "franka");
+    // priority=0 → highest; matches P0 manipulation robots in the demo
+    let policy    = conn.model("manipulation-policy", 30.0, 0);
+    let telemetry = conn.model("telemetry", 100.0, 1);
 
-    for step in 0..100 {
-        let state: Vec<f32> = (0..7).map(|i| i as f32 * 0.1).collect();
-        model.observe()
-            .urgency(0.5)
-            .tensor_f32("state", &state, &[7])
+    let steps = 100;
+    for step in 0..steps {
+        let state: Vec<f32> = (0..14).map(|i| i as f32 * 0.1).collect();
+        let urgency = (1.0f32).min((steps - step) as f32 / steps as f32);
+        policy.observe()
+            .urgency(urgency)
+            .steps_remaining(steps - step)
+            .tensor_f32("state", &state, &[14])
             .send();
 
-        if let Some(result) = model.get_result(100) {
+        if let Some(result) = policy.get_result(100) {
             let actions = result["actions"].as_f32();
             println!("step {}: actions={:?}", step, &actions[..3.min(actions.len())]);
+        }
+
+        if step % 5 == 0 {
+            telemetry.observe().urgency(0.1)
+                .tensor_f32("state", &state, &[14]).send();
         }
     }
 }
@@ -157,18 +185,21 @@ use inferential::AsyncConnection;
 
 #[tokio::main]
 async fn main() {
-    let mut conn = AsyncConnection::new("tcp://localhost:5555", "rust-async", "sim").await;
-    let mut model = conn.model("policy-v2", 30.0, 1);
+    let mut conn = AsyncConnection::new("tcp://localhost:5555", "arm-01", "franka").await;
+    let mut policy = conn.model("manipulation-policy", 30.0, 0);
 
-    for step in 0..100 {
-        let state: Vec<f32> = (0..7).map(|i| i as f32 * 0.1).collect();
-        model.observe()
-            .urgency(0.5)
-            .tensor_f32("state", &state, &[7])
+    let steps = 100u32;
+    for step in 0..steps {
+        let state: Vec<f32> = (0..14).map(|i| i as f32 * 0.1).collect();
+        let urgency = (1.0f32).min((steps - step) as f32 / steps as f32);
+        policy.observe()
+            .urgency(urgency)
+            .steps_remaining(steps - step)
+            .tensor_f32("state", &state, &[14])
             .send()
             .await;
 
-        if let Some(result) = model.get_result(100).await {
+        if let Some(result) = policy.get_result(100).await {
             let actions = result["actions"].as_f32();
             println!("step {}: actions={:?}", step, &actions[..3.min(actions.len())]);
         }
@@ -184,16 +215,20 @@ async fn main() {
 @server.on_metric
 def log_metrics(name: str, value: float, labels: dict) -> None:
     client = labels.get("client", "")
-    if name in ("inference_latency_ms", "e2e_latency_ms"):
-        print(f"  [{client}] {name}: {value:.1f}ms")
+    model  = labels.get("model", "")
+    if name == "e2e_latency_ms":
+        print(f"  [{model}/{client}] {value:.1f}ms")
+    if name == "queue_depth":
+        print(f"  [{model}] depth={int(value)}")
 ```
 
 ### Swap Scheduler
 
 ```python
-server.use_scheduler("round_robin")
-server.use_scheduler("batch_optimized")
-server.use_scheduler("priority_tiered")
+server.use_scheduler("round_robin")        # baseline, no priority
+server.use_scheduler("model_deadline")     # recommended: per-model queues + priority scoring
+server.use_scheduler("deadline_aware")     # single queue, deadline + urgency scoring
+server.use_scheduler("priority_tiered")    # legacy: fixed priority tiers
 ```
 
 ### Custom Scoring
@@ -205,16 +240,16 @@ from inferential import register_policy, InferenceRequest
 def score(req: InferenceRequest) -> float:
     return 1.0 / max(req.latency_budget_ms, 1.0)
 
-server.use_scheduler("deadline_aware", policy="latency_first")
+server.use_scheduler("model_deadline", policy="latency_first")
 ```
 
 ### Real Model
 
-Replace `MockPolicy` with your model:
+Replace the mock with your GPU-backed model. Set `num_replicas` to match available GPUs and `max_inflight` to the same value so the scheduler — not Ray Serve — owns the queue:
 
 ```python
-@serve.deployment(num_replicas=2, ray_actor_options={"num_gpus": 1})
-class MyModel:
+@serve.deployment(num_replicas=4, ray_actor_options={"num_gpus": 1})
+class ManipulationPolicy:
     def __init__(self):
         self.model = load_model("weights.pt")
 
@@ -225,18 +260,23 @@ class MyModel:
 ### Queue Tuning
 
 ```python
-from inferential.config import InferentialConfig
+from inferential.config.schema import InferentialConfig, ModelConfig, ModelsConfig
 
-server = Server(
-    bind="tcp://*:5555",
-    models=["policy-v2"],
-    config=InferentialConfig(
-        scheduling={
-            "strategy": "deadline_aware",
-            "request_ttl_ms": 2000,
-            "overflow_policy": "drop_oldest",
-            "max_retries": 2,
-        }
+config = InferentialConfig(
+    models=ModelsConfig(
+        known={
+            "manipulation-policy": ModelConfig(max_inflight=4),  # match num_replicas/GPUs
+            "telemetry":           ModelConfig(max_inflight=1),
+        },
+        default_max_inflight=2,
     ),
 )
+config.transport.bind = "tcp://*:5555"
+config.scheduling.strategy = "model_deadline"
+config.scheduling.pipeline_dispatch.enabled = True
+config.scheduling.request_ttl_ms = 2000
+config.scheduling.overflow_policy = "drop_oldest"
+config.scheduling.max_retries = 2
+
+server = Server(config=config, models=["manipulation-policy", "telemetry"])
 ```

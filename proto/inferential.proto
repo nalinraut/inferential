@@ -44,6 +44,7 @@ message Observation {
     string model_id = 5;
     optional uint32 steps_remaining = 6;  // optional hint from robot
     map<string, string> metadata = 7;
+    uint32 priority = 8;          // 0 = highest priority
 }
 
 message ModelResponse {

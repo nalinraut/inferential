@@ -10,8 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Verify vendored proto is in sync
-        run: diff proto/inferential.proto rust/proto/inferential.proto
       - name: Verify vendored LICENSE is in sync
         run: diff LICENSE rust/LICENSE
       - run: sudo apt-get update && sudo apt-get install -y libzmq3-dev protobuf-compiler

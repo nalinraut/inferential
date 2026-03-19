@@ -17,6 +17,7 @@ class DecodedObservation:
     model_id: str
     timestamp_ns: int
     urgency: float
+    priority: int
     steps_remaining: int | None
     slots: list[SlotInfo]
     envelope: bytes
@@ -89,6 +90,7 @@ class ObservationAssembler:
             model_id=obs.model_id,
             timestamp_ns=obs.timestamp_ns,
             urgency=obs.urgency,
+            priority=obs.priority,
             steps_remaining=steps_remaining,
             slots=slots,
             envelope=envelope,

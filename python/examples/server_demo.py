@@ -1,4 +1,11 @@
-"""Inferential server with a mock Ray Serve model.
+"""Inferential server with model_deadline + pipeline dispatch.
+
+Two mock models are served:
+  - manipulation-policy  (max_inflight=3, latency ~5ms)
+  - telemetry            (max_inflight=1, latency ~1ms)
+
+Each model gets its own dispatch loop bounded by its replica count.
+Priority is client-sent — 0 is highest, scores higher within the queue.
 
 Usage:
     ray start --head
@@ -8,51 +15,70 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import time
 
 import numpy as np
 from ray import serve
 
 from inferential import Server
+from inferential.config.schema import InferentialConfig, ModelConfig, ModelsConfig
 
 
 @serve.deployment
-class MockPolicy:
-    """Returns random actions for any observation.
-
-    The infer() method receives a dict of numpy arrays (deserialized from
-    the wire format) and returns a dict. Return values can be any array-like
-    (numpy, torch, jax, etc.) — the dispatcher converts via np.asarray().
-    """
+class ManipulationPolicy:
+    """Simulates a heavier manipulation policy (~5ms inference)."""
 
     def infer(self, obs: dict) -> dict:
+        time.sleep(0.005)
         dim = 7
         for v in obs.values():
-            if isinstance(v, np.ndarray) and v.ndim == 1:
-                dim = v.shape[0]
+            if isinstance(v, np.ndarray) and v.ndim >= 1:
+                dim = v.shape[-1]
                 break
         return {"actions": np.random.randn(dim).astype(np.float32)}
 
 
-def main() -> None:
-    serve.run(MockPolicy.bind(), name="policy-v2")
+@serve.deployment
+class TelemetryModel:
+    """Simulates a lightweight telemetry model (~1ms inference)."""
 
-    server = Server(
-        bind="tcp://*:5555",
-        models=["policy-v2"],
+    def infer(self, obs: dict) -> dict:
+        time.sleep(0.001)
+        return {"status": np.array([1.0], dtype=np.float32)}
+
+
+def main() -> None:
+    serve.run(
+        ManipulationPolicy.bind(), name="manipulation-policy", route_prefix="/manipulation-policy"
     )
-    server.use_scheduler("deadline_aware")
+    serve.run(TelemetryModel.bind(), name="telemetry", route_prefix="/telemetry")
+
+    config = InferentialConfig(
+        models=ModelsConfig(
+            known={
+                "manipulation-policy": ModelConfig(max_inflight=3),
+                "telemetry": ModelConfig(max_inflight=1),
+            },
+            default_max_inflight=2,
+        ),
+    )
+    config.scheduling.strategy = "model_deadline"
+    config.scheduling.pipeline_dispatch.enabled = True
+
+    server = Server(config=config)
 
     @server.on_metric
     def log_metrics(name: str, value: float, labels: dict) -> None:
+        model = labels.get("model", "")
         client = labels.get("client", "")
-        prefix = f"  [{client}]" if client else " "
-        if name in ("inference_latency_ms", "observation_staleness_ms",
-                     "scheduling_wait_ms", "e2e_latency_ms"):
-            print(f"{prefix} {name}: {value:.1f}ms")
-        elif name in ("queue_full_drops", "dispatch_errors", "dispatch_retries",
-                       "requests_expired", "client_disconnected", "observation_errors"):
-            print(f"{prefix} {name}: {value:.0f}")
+        tag = f"[{model or client}]" if (model or client) else ""
+        if name in ("e2e_latency_ms", "scheduling_wait_ms", "inference_latency_ms"):
+            print(f"  {tag} {name}: {value:.1f}ms")
+        elif name in ("queue_depth",):
+            if value > 0:
+                print(f"  {tag} {name}: {value:.0f}")
 
+    print("Server started — manipulation-policy (max_inflight=3), telemetry (max_inflight=1)")
     asyncio.run(server.run())
 
 

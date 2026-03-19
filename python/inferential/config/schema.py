@@ -29,8 +29,28 @@ class TieredConfig(BaseModel):
     num_tiers: int = Field(default=3, ge=1)
 
 
+class PipelineDispatchConfig(BaseModel):
+    enabled: bool = False
+
+
+class PredictivePreDispatchConfig(BaseModel):
+    enabled: bool = False
+    lookahead_ms: float = Field(default=5.0, gt=0)
+    max_miss_rate: float = Field(default=0.3, gt=0, le=1.0)
+    min_cadence_samples: int = Field(default=5, ge=2)
+
+
+class ModelConfig(BaseModel):
+    max_inflight: int = Field(default=2, ge=1)
+
+
+class ModelsConfig(BaseModel):
+    known: dict[str, ModelConfig] = Field(default_factory=dict)
+    default_max_inflight: int = Field(default=2, ge=1)
+
+
 class SchedulingConfig(BaseModel):
-    strategy: str = "deadline_aware"
+    strategy: str = "model_deadline"
     max_queue_size: int = Field(default=1000, ge=1)
     request_ttl_ms: float = Field(default=5000.0, gt=0)
     overflow_policy: Literal["drop_oldest", "reject_newest"] = "drop_oldest"
@@ -39,18 +59,19 @@ class SchedulingConfig(BaseModel):
     deadline_aware: DeadlineAwareConfig = DeadlineAwareConfig()
     batch_optimized: BatchConfig = BatchConfig()
     priority_tiered: TieredConfig = TieredConfig()
+    model_deadline: DeadlineAwareConfig = DeadlineAwareConfig()
+    pipeline_dispatch: PipelineDispatchConfig = PipelineDispatchConfig()
+    predictive_pre_dispatch: PredictivePreDispatchConfig = PredictivePreDispatchConfig()
 
 
 class ClientDefaults(BaseModel):
     latency_budget_ms: float = Field(default=50.0, gt=0)
-    priority: int = Field(default=1, ge=0)
 
 
 class ClientEntry(BaseModel):
     id: str
     model: str
     latency_budget_ms: float | None = None
-    priority: int | None = None
 
 
 class ClientsConfig(BaseModel):
@@ -79,6 +100,7 @@ class InferentialConfig(BaseModel):
     ray: dict = Field(default_factory=dict)
     transport: TransportConfig = TransportConfig()
     scheduling: SchedulingConfig = SchedulingConfig()
+    models: ModelsConfig = ModelsConfig()
     clients: ClientsConfig = ClientsConfig()
     response_tracking: ResponseTrackingConfig = ResponseTrackingConfig()
     observations: ObservationConfig = ObservationConfig()
@@ -90,8 +112,8 @@ class InferentialConfig(BaseModel):
                 return entry.latency_budget_ms
         return self.clients.defaults.latency_budget_ms
 
-    def get_client_priority(self, client_id: str) -> int:
-        for entry in self.clients.known:
-            if entry.id == client_id and entry.priority is not None:
-                return entry.priority
-        return self.clients.defaults.priority
+    def get_model_max_inflight(self, model_id: str) -> int:
+        model = self.models.known.get(model_id)
+        if model is not None:
+            return model.max_inflight
+        return self.models.default_max_inflight

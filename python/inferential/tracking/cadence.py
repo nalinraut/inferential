@@ -45,6 +45,9 @@ class CadenceTracker:
     def learned_cadence(self, client_id: str) -> float | None:
         return self._cadence.get(client_id)
 
+    def sample_count(self, client_id: str) -> int:
+        return self._sample_count.get(client_id, 0)
+
     def confidence(self, client_id: str) -> float:
         count = self._sample_count.get(client_id, 0)
         return min(count / 10.0, 1.0)
