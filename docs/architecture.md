@@ -2,7 +2,7 @@
 
 ## System Overview
 
-Inferential sits between your clients and your ML models. Clients send observations over ZMQ, the server schedules and dispatches inference to Ray Serve, and streams results back.
+Inferential sits between your clients and your ML models. Clients send observations over ZMQ, the server schedules and dispatches inference to local models or Ray Serve, and streams results back.
 
 ```
                         Inferential Server
@@ -12,8 +12,8 @@ Inferential sits between your clients and your ML models. Clients send observati
   Client B ──ZMQ──┤                  │           │
   Client C ──ZMQ──┤              next_batch()    │
                   │                  │           │
-                  │              Dispatcher ─────┼──► Ray Serve
-                  │                  │           │    (model replicas)
+                  │              Dispatcher ─────┼──► Models (local or Ray Serve)
+                  │                  │           │
                   │              responses       │
                   │                  │           │
   Client A ◄─ZMQ─┤  Transport ◄────┘           │
@@ -31,7 +31,7 @@ Clients can be written in **Python**, **C++**, or **Rust** — any language that
 3. **Assembler** parses the protobuf envelope, validates tensor slots against the payload, extracts client/model info
 4. **Server** updates cadence tracking, client registry, and metrics, then builds an `InferenceRequest`
 5. **Scheduler** queues the request and scores/orders it according to its strategy
-6. **Dispatcher** pulls the next batch, deserializes tensors, calls `model.infer()` via Ray Serve handles
+6. **Dispatcher** pulls the next batch, deserializes tensors, calls `model.infer()` via the configured backend (LocalDispatcher or RayDispatcher)
 7. **Response** is serialized back to protobuf + binary and sent to the client over ZMQ
 
 ## Wire Protocol
@@ -169,7 +169,7 @@ The `model_deadline` scheduler routes requests by `model_id` into per-model heap
      semaphore(3)               semaphore(1)
 ```
 
-When combined with **pipeline dispatch**, each model gets its own dispatch loop with a semaphore bounded to `max_inflight` (matching the model's Ray Serve replica count). Models are registered dynamically — when the first request for a new model arrives, the server spins up its dispatch loop.
+When combined with **pipeline dispatch**, each model gets its own dispatch loop with a semaphore bounded to `max_inflight`. With Ray Serve, this matches the replica count; with LocalDispatcher, it controls concurrency for in-process inference. Models are registered dynamically — when the first request for a new model arrives, the server spins up its dispatch loop.
 
 ```python
 config = InferentialConfig(
@@ -238,7 +238,7 @@ The scheduler queue supports TTL, overflow policies, and dispatch retry:
 
 ### Pipeline Dispatch
 
-When `pipeline_dispatch.enabled = True` and the scheduler is model-aware (`model_deadline`), the server runs a separate dispatch coroutine per model. Each model has a semaphore bounded to its `max_inflight` value, matching the model's Ray Serve replica count.
+When `pipeline_dispatch.enabled = True` and the scheduler is model-aware (`model_deadline`), the server runs a separate dispatch coroutine per model. Each model has a semaphore bounded to its `max_inflight` value.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -256,7 +256,7 @@ In-memory ring-buffer metrics with label filtering and percentile stats.
 
 | Metric | Labels | Description |
 |--------|--------|-------------|
-| `inference_latency_ms` | `client`, `model`* | Time spent in Ray Serve model |
+| `inference_latency_ms` | `client`, `model`* | Time spent in model inference |
 | `scheduling_wait_ms` | `client`, `model`* | Time request sat in queue before dispatch |
 | `e2e_latency_ms` | `client`, `model`* | Total server-side time (queue wait + inference) |
 | `observation_staleness_ms` | `client` | Age of observation on arrival |

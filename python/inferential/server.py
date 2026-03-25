@@ -8,7 +8,7 @@ from typing import Any, Callable
 import zmq
 
 from inferential.config.schema import InferentialConfig
-from inferential.dispatch.dispatcher import RayDispatcher
+from inferential.dispatch.base import Dispatcher
 from inferential.metrics.collector import MetricsCollector
 from inferential.observation.assembler import ObservationAssembler
 from inferential.observation.slots import ObservationError
@@ -34,6 +34,7 @@ class Server:
         bind: str = "tcp://*:5555",
         models: list[str] | None = None,
         config: InferentialConfig | None = None,
+        dispatcher: Dispatcher | None = None,
     ) -> None:
         if config is None:
             config = InferentialConfig()
@@ -51,7 +52,12 @@ class Server:
             disconnect_timeout_s=config.response_tracking.disconnect_timeout_s,
         )
         self._client_registry = ClientRegistry()
-        self._dispatcher = RayDispatcher(config.ray)
+        if dispatcher is not None:
+            self._dispatcher: Dispatcher = dispatcher
+        else:
+            from inferential.dispatch.dispatcher import RayDispatcher
+
+            self._dispatcher = RayDispatcher(config.ray)
         self._metrics = MetricsCollector(config.metrics)
         self._scheduler: Scheduler | None = None
         self._model_events: dict[str, asyncio.Event] = {}
@@ -375,7 +381,7 @@ class Server:
                 continue
 
             # Collect more ready requests so the dispatcher can
-            # saturate multiple Ray Serve replicas concurrently.
+            # saturate multiple replicas or batch local inference.
             max_concurrent = self._config.scheduling.max_concurrent_dispatch
             while len(batch) < max_concurrent:
                 more = self._scheduler.next_batch()

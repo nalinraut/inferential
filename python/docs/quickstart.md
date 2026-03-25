@@ -5,23 +5,53 @@ Get a server and client running locally in under 5 minutes.
 ## Prerequisites
 
 - Python 3.11+
-- A running Ray cluster (single-node is fine)
 
 ## 1. Install
 
 ```bash
-pip install inferential[server]
+# Edge server (no Ray dependency)
+pip install inferential
+
+# Or with Ray Serve for distributed serving
+pip install inferential[ray]
 ```
 
-This pulls in Ray Serve, pyzmq, protobuf, numpy, and pydantic.
+## 2. Create a Server
 
-## 2. Start Ray
+### Option A: Edge Server (LocalDispatcher — no Ray)
+
+Save as `server.py`:
+
+```python
+import asyncio
+import numpy as np
+from inferential import Server, LocalDispatcher
+
+def mock_policy(obs: dict) -> dict:
+    dim = 7
+    for v in obs.values():
+        if isinstance(v, np.ndarray) and v.ndim == 1:
+            dim = v.shape[0]
+            break
+    return {"actions": np.random.randn(dim).astype(np.float32)}
+
+dispatcher = LocalDispatcher({"policy-v2": mock_policy})
+server = Server(bind="tcp://*:5555", dispatcher=dispatcher)
+
+@server.on_metric
+def log(name, value, labels):
+    if name == "inference_latency_ms":
+        client = labels.get("client", "?")
+        print(f"  [{client}] {value:.1f}ms")
+
+asyncio.run(server.run())
+```
+
+### Option B: Ray Serve Server (distributed)
 
 ```bash
 ray start --head
 ```
-
-## 3. Create a Server
 
 Save as `server.py`:
 
@@ -58,12 +88,6 @@ Run it:
 
 ```bash
 python server.py
-```
-
-You should see:
-
-```
-Application 'policy-v2' is ready at http://127.0.0.1:8000/.
 ```
 
 ## 4. Connect a Client
@@ -109,7 +133,7 @@ step 2: actions=[ 0.91 -0.18  0.03]... latency=1.2ms
 ...
 ```
 
-The first request is slower (Ray Serve cold start). Subsequent requests settle around 1-2ms for this mock model.
+The first request may be slower (cold start). Subsequent requests settle around 1-2ms for this mock model.
 
 On the server terminal you'll see metric callbacks firing:
 
@@ -161,7 +185,7 @@ The API mirrors the sync client — `observe()` and `get_result()` are `await`-e
 
 ```bash
 # Stop the server with Ctrl+C
-ray stop
+ray stop  # only if using Ray Serve
 ```
 
 ## Next Steps
@@ -176,7 +200,7 @@ from inferential.config.schema import InferentialConfig, ModelConfig, ModelsConf
 config = InferentialConfig(
     models=ModelsConfig(
         known={
-            "manipulation-policy": ModelConfig(max_inflight=4),  # 4 GPU replicas
+            "manipulation-policy": ModelConfig(max_inflight=4),
             "telemetry":           ModelConfig(max_inflight=1),
         },
     ),
@@ -188,7 +212,7 @@ config.scheduling.pipeline_dispatch.enabled = True
 server = Server(config=config, models=["manipulation-policy", "telemetry"])
 ```
 
-`max_inflight` should match `num_replicas` on your Ray Serve deployment. This keeps one request queued per GPU at the scheduler level — so priority ordering is always respected before a request reaches Ray Serve.
+`max_inflight` controls per-model dispatch concurrency. With Ray Serve, match it to `num_replicas`. With LocalDispatcher, set it to 1 for sequential GPU inference or higher if your model supports concurrent calls.
 
 - [Architecture](../../docs/architecture.md) — system design, wire protocol, schedulers, configuration reference
 - [Examples](../../docs/examples.md) — multi-language client demos, server extensions, custom schedulers

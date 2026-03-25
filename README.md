@@ -6,11 +6,11 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://pypi.org/project/inferential/)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange)](https://crates.io/crates/inferential)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)](cpp/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-Multi-client inference orchestration on top of Ray Serve.
+Multi-client inference orchestration and scheduling.
 
-Inferential sits between your clients and your ML models. It receives observations over ZMQ, schedules inference requests using cadence-aware priority scoring, dispatches to Ray Serve, and streams results back — all with sub-millisecond transport overhead. Built for any scenario where multiple clients need concurrent access to shared models: robotics fleets, game agents, IoT devices, real-time ML pipelines.
+Inferential sits between your clients and your ML models. It receives observations over ZMQ, schedules inference requests using cadence-aware priority scoring, dispatches to local models or Ray Serve, and streams results back — all with sub-millisecond transport overhead. Built for any scenario where multiple clients need concurrent access to shared models: robotics fleets, game agents, IoT devices, real-time ML pipelines.
 
 ![Inferential data flow](https://raw.githubusercontent.com/nalinraut/inferential/main/assets/InferentialFlow.gif)
 
@@ -31,7 +31,7 @@ Every request generates metrics across the pipeline, stored in a ring buffer (10
 
 | Metric | Labels | What it captures |
 |--------|--------|-----------------|
-| `inference_latency_ms` | `client`, `model` | Pure model execution time (Ray Serve) |
+| `inference_latency_ms` | `client`, `model` | Pure model execution time |
 | `scheduling_wait_ms` | `client`, `model` | Time spent in the scheduler queue |
 | `e2e_latency_ms` | `client`, `model` | Total server-side delay (queue + inference) |
 | `observation_staleness_ms` | `client` | Age of sensor data on arrival |
@@ -61,8 +61,8 @@ stats = server.metrics.get_stats("e2e_latency_ms", labels={"model": "manipulatio
   Client B ──ZMQ──┤           ┌────┴────┐       │
   Client C ──ZMQ──┤       "policy"  "telemetry"  │
                   │           │          │       │
-                  │       Dispatch   Dispatch ───┼──► Ray Serve
-                  │        (sem 3)    (sem 1)    │    (per-model replicas)
+                  │       Dispatch   Dispatch ───┼──► Models (local or Ray Serve)
+                  │        (sem 3)    (sem 1)    │    (per-model dispatch)
                   │           └────┬────┘        │
   Client A ◄─ZMQ─┤  Transport ◄───┘             │
   Client B ◄─ZMQ─┤                              │
@@ -76,8 +76,11 @@ stats = server.metrics.get_stats("e2e_latency_ms", labels={"model": "manipulatio
 ## Install
 
 ```bash
-# Python
+# Python (edge — no Ray dependency)
 pip install inferential
+
+# Python (with Ray Serve for distributed serving)
+pip install inferential[ray]
 
 # Rust
 cargo add inferential
@@ -163,7 +166,42 @@ if let Some(result) = model.get_result(50) {
 
 ## Server
 
-The server runs on Python with Ray Serve. See the [Python SDK](python/) for server setup.
+The server runs on Python with either **local in-process models** (edge) or **Ray Serve** (distributed). See the [Python SDK](python/) for full setup.
+
+<details>
+<summary><b>Edge server (LocalDispatcher — no Ray)</b></summary>
+
+```python
+import asyncio
+from inferential import Server, LocalDispatcher
+from inferential.config.schema import InferentialConfig, ModelConfig, ModelsConfig
+
+def my_policy(obs: dict) -> dict:
+    return {"actions": ...}  # your model inference
+
+dispatcher = LocalDispatcher({
+    "manipulation-policy": my_policy,
+    "telemetry": my_telemetry_fn,
+})
+
+config = InferentialConfig(
+    models=ModelsConfig(
+        known={
+            "manipulation-policy": ModelConfig(max_inflight=3),
+            "telemetry":           ModelConfig(max_inflight=1),
+        },
+    ),
+)
+config.scheduling.strategy = "model_deadline"
+config.scheduling.pipeline_dispatch.enabled = True
+
+server = Server(config=config, dispatcher=dispatcher)
+asyncio.run(server.run())
+```
+</details>
+
+<details>
+<summary><b>Ray Serve server (distributed)</b></summary>
 
 ```python
 import asyncio
@@ -173,16 +211,15 @@ from inferential.config.schema import InferentialConfig, ModelConfig, ModelsConf
 config = InferentialConfig(
     models=ModelsConfig(
         known={
-            "manipulation-policy": ModelConfig(max_inflight=4),  # match GPU replica count
+            "manipulation-policy": ModelConfig(max_inflight=4),  # match replica count
             "telemetry":           ModelConfig(max_inflight=1),
         },
     ),
 )
-config.transport.bind = "tcp://*:5555"
 config.scheduling.strategy = "model_deadline"
 config.scheduling.pipeline_dispatch.enabled = True
 
-server = Server(config=config, models=["manipulation-policy", "telemetry"])
+server = Server(config=config)  # defaults to RayDispatcher
 
 @server.on_metric
 def log(name, value, labels):
@@ -191,6 +228,7 @@ def log(name, value, labels):
 
 asyncio.run(server.run())
 ```
+</details>
 
 ## Documentation
 
@@ -222,4 +260,4 @@ make clean          # Clean all build artifacts
 
 ## License
 
-MIT
+Apache 2.0

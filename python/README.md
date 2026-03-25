@@ -1,15 +1,15 @@
 # Inferential Python SDK
 
-Python client and server SDK for [Inferential](../README.md) inference orchestration. The Python package includes both the **client SDK** (for sending observations and receiving results) and the **server** (Ray Serve-based scheduling and dispatch).
+Python client and server SDK for [Inferential](../README.md) inference orchestration. The Python package includes the **client SDK** (for sending observations and receiving results) and the **server** (scheduling and dispatch to local models or Ray Serve).
 
 ## Install
 
 ```bash
-# Client SDK only (pyzmq, protobuf, numpy)
+# Client + edge server (pyzmq, protobuf, numpy, pydantic — no Ray)
 pip install inferential
 
-# Server with Ray Serve
-pip install inferential[server]
+# With Ray Serve for distributed serving
+pip install inferential[ray]
 
 # Development
 pip install inferential[dev]
@@ -19,7 +19,33 @@ pip install inferential[dev]
 
 See the full [Quick Start guide](docs/quickstart.md) for step-by-step setup.
 
-### Server
+### Edge Server (LocalDispatcher — no Ray)
+
+```python
+import asyncio
+import numpy as np
+from inferential import Server, LocalDispatcher
+
+def my_policy(obs: dict) -> dict:
+    dim = 7
+    for v in obs.values():
+        if isinstance(v, np.ndarray) and v.ndim == 1:
+            dim = v.shape[0]
+            break
+    return {"actions": np.random.randn(dim).astype(np.float32)}
+
+dispatcher = LocalDispatcher({"policy-v2": my_policy})
+server = Server(bind="tcp://*:5555", dispatcher=dispatcher)
+
+@server.on_metric
+def log(name, value, labels):
+    if name == "inference_latency_ms":
+        print(f"Client {labels.get('client')}: {value:.1f}ms")
+
+asyncio.run(server.run())
+```
+
+### Ray Serve Server (distributed)
 
 ```python
 import asyncio
@@ -39,13 +65,7 @@ class MockPolicy:
 
 serve.run(MockPolicy.bind(), name="policy-v2")
 
-server = Server(bind="tcp://*:5555", models=["policy-v2"])
-
-@server.on_metric
-def log(name, value, labels):
-    if name == "inference_latency_ms":
-        print(f"Client {labels.get('client')}: {value:.1f}ms")
-
+server = Server(bind="tcp://*:5555", models=["policy-v2"])  # defaults to RayDispatcher
 asyncio.run(server.run())
 ```
 

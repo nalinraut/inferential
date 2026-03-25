@@ -245,7 +245,7 @@ server.use_scheduler("model_deadline", policy="latency_first")
 
 ### Real Model
 
-Replace the mock with your GPU-backed model. Set `num_replicas` to match available GPUs and `max_inflight` to the same value so the scheduler — not Ray Serve — owns the queue:
+Replace the mock with your GPU-backed model. With Ray Serve, set `num_replicas` to match available GPUs and `max_inflight` to the same value so the scheduler owns the queue. With LocalDispatcher, pass your model's inference callable directly:
 
 ```python
 @serve.deployment(num_replicas=4, ray_actor_options={"num_gpus": 1})
